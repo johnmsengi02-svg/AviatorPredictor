@@ -72,7 +72,7 @@ public class ScreenOcrService extends Service {
 
         overlayView = new LinearLayout(this);
         overlayView.setOrientation(LinearLayout.VERTICAL);
-        overlayView.setBackgroundColor(Color.argb(230, 18, 22, 35));
+        overlayView.setBackgroundColor(Color.argb(235, 18, 22, 35));
         overlayView.setPadding(24, 18, 24, 18);
 
         TextView header = new TextView(this);
@@ -83,7 +83,7 @@ public class ScreenOcrService extends Service {
         overlayView.addView(header);
 
         overlayLastReadText = new TextView(this);
-        overlayLastReadText.setText("Last Read: Scanning...");
+        overlayLastReadText.setText("Status: Waiting for screen...");
         overlayLastReadText.setTextColor(Color.LTGRAY);
         overlayLastReadText.setTextSize(12);
         overlayView.addView(overlayLastReadText);
@@ -113,11 +113,10 @@ public class ScreenOcrService extends Service {
                 PixelFormat.TRANSLUCENT
         );
 
-        params.gravity = Gravity.TOP | Gravity.START;
+        params.gravity = Gravity.BOTTOM | Gravity.START;
         params.x = 30;
-        params.y = 150;
+        params.y = 120;
 
-        // Wezesha kuburuza (drag) kidirisha popote kwenye skrini
         overlayView.setOnTouchListener(new View.OnTouchListener() {
             private int initialX, initialY;
             private float initialTouchX, initialTouchY;
@@ -133,7 +132,7 @@ public class ScreenOcrService extends Service {
                         return true;
                     case MotionEvent.ACTION_MOVE:
                         params.x = initialX + (int) (event.getRawX() - initialTouchX);
-                        params.y = initialY + (int) (event.getRawY() - initialTouchY);
+                        params.y = initialY - (int) (event.getRawY() - initialTouchY);
                         windowManager.updateViewLayout(overlayView, params);
                         return true;
                 }
@@ -169,7 +168,7 @@ public class ScreenOcrService extends Service {
             public void run() {
                 if (!isScanning) return;
                 captureAndProcessFrame();
-                handler.postDelayed(this, 1500); // Soma skrini kila sekunde 1.5
+                handler.postDelayed(this, 1200);
             }
         };
         handler.post(scanRunnable);
@@ -182,9 +181,9 @@ public class ScreenOcrService extends Service {
             if (image == null) return;
 
             Image.Plane[] planes = image.getPlanes();
-            ByteBuffer buffer = planes[0].getBuffer();
-            int pixelStride = planes[0].getPixelStride();
-            int rowStride = planes[0].getRowStride();
+            ByteBuffer buffer = planes.getBuffer();
+            int pixelStride = planes.getPixelStride();
+            int rowStride = planes.getRowStride();
             int rowPadding = rowStride - pixelStride * screenWidth;
 
             Bitmap bitmap = Bitmap.createBitmap(
@@ -196,17 +195,30 @@ public class ScreenOcrService extends Service {
             image.close();
             image = null;
 
-            // Kata sehemu ya juu ya skrini (ambapo historia ya multipliers hukaa) ili OCR iwe haraka
-            Bitmap croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight / 2);
+            // Soma 75% ya sehemu ya juu ya skrini (acha sehemu ya chini ambapo kidirisha kimewekwa)
+            int cropHeight = (int) (screenHeight * 0.75);
+            Bitmap croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, cropHeight);
             bitmap.recycle();
 
-            InputImage inputImage = InputImage.fromBitmap(croppedBitmap, 0);
+            // Kuza picha mara 1.5 ili OCR isome namba ndogo za SportyBet kwa urahisi
+            Bitmap scaledBitmap = Bitmap.createScaledBitmap(
+                    croppedBitmap,
+                    (int) (screenWidth * 1.5),
+                    (int) (cropHeight * 1.5),
+                    true
+            );
+            croppedBitmap.recycle();
+
+            InputImage inputImage = InputImage.fromBitmap(scaledBitmap, 0);
             textRecognizer.process(inputImage)
                     .addOnSuccessListener(visionText -> {
                         extractMultiplier(visionText.getText());
-                        croppedBitmap.recycle();
+                        scaledBitmap.recycle();
                     })
-                    .addOnFailureListener(e -> croppedBitmap.recycle());
+                    .addOnFailureListener(e -> {
+                        overlayLastReadText.setText("OCR Error: Retrying...");
+                        scaledBitmap.recycle();
+                    });
 
         } catch (Exception e) {
             if (image != null) image.close();
@@ -214,19 +226,32 @@ public class ScreenOcrService extends Service {
     }
 
     private void extractMultiplier(String rawText) {
-        // Tafuta muundo wa namba zenye 'x' kama 1.45x, 12.30x, 2.00x
-        Pattern pattern = Pattern.compile("\\b(\\d+\\.\\d{1,2})[xX]\\b");
+        if (rawText == null || rawText.trim().isEmpty()) {
+            overlayLastReadText.setText("Screen: Blank / Protected");
+            return;
+        }
+
+        // Tambua namba zenye desimali na 'x' (mfano 1.45x, 1.45 x, 12.3x)
+        Pattern pattern = Pattern.compile("(\\d+\\.\\d{1,2})\\s*[xX]");
         Matcher matcher = pattern.matcher(rawText);
 
-        if (matcher.find()) {
+        boolean foundAny = false;
+        while (matcher.find()) {
             try {
                 double detectedValue = Double.parseDouble(matcher.group(1));
-                SignalEngine.addResult(detectedValue);
-
-                overlayLastReadText.setText("Last Read: " + String.format("%.2fx", detectedValue));
-                overlaySignalText.setText(SignalEngine.getSignalAnalysis());
+                if (detectedValue >= 1.00 && detectedValue <= 5000.0) {
+                    SignalEngine.addResult(detectedValue);
+                    overlayLastReadText.setText("Last Read: " + String.format("%.2fx", detectedValue));
+                    overlaySignalText.setText(SignalEngine.getSignalAnalysis());
+                    foundAny = true;
+                    break; // Chukua matokeo ya kwanza ya juu (ya hivi karibuni zaidi)
+                }
             } catch (NumberFormatException ignored) {
             }
+        }
+
+        if (!foundAny) {
+            overlayLastReadText.setText("Scanning... (No 'x' found yet)");
         }
     }
 
@@ -234,39 +259,3 @@ public class ScreenOcrService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     "ocr_channel",
-                    "Aviator Live OCR Service",
-                    NotificationManager.IMPORTANCE_LOW
-            );
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) manager.createNotificationChannel(channel);
-        }
-    }
-
-    private Notification buildNotification() {
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, "ocr_channel")
-                : new Notification.Builder(this);
-
-        return builder.setContentTitle("Aviator Predictor OCR Active")
-                .setContentText("Reading multipliers from screen...")
-                .setSmallIcon(android.R.drawable.ic_menu_view)
-                .build();
-    }
-
-    @Override
-    public void onDestroy() {
-        isScanning = false;
-        if (handler != null && scanRunnable != null) handler.removeCallbacks(scanRunnable);
-                if (virtualDisplay != null) virtualDisplay.release();
-        if (imageReader != null) imageReader.close();
-        if (mediaProjection != null) mediaProjection.stop();
-        if (overlayView != null && windowManager != null) windowManager.removeView(overlayView);
-        super.onDestroy();
-    }
-
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-}
-
