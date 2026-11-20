@@ -1,278 +1,176 @@
 package com.aviatorpredictor;
 
 import android.app.*;
-import android.content.Context;
-import android.content.Intent;
+import android.content.*;
 import android.graphics.*;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
+import android.hardware.display.*;
+import android.media.*;
+import android.media.projection.*;
 import android.os.*;
 import android.util.DisplayMetrics;
 import android.view.*;
 import android.widget.*;
 import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.*;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import java.nio.ByteBuffer;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.regex.*;
 
 public class ScreenOcrService extends Service {
-
-    private WindowManager windowManager;
-    private LinearLayout overlayView;
-    private TextView overlaySignalText, overlayLastReadText;
-
-    private MediaProjection mediaProjection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
-    private TextRecognizer textRecognizer;
-
+    private WindowManager wm;
+    private LinearLayout overlay;
+    private TextView txtSignal, txtStatus;
+    private MediaProjection mp;
+    private VirtualDisplay vd;
+    private ImageReader ir;
+    private TextRecognizer tr;
     private Handler handler;
-    private Runnable scanRunnable;
-    private int screenWidth, screenHeight, screenDensity;
-    private boolean isScanning = false;
+    private Runnable runner;
+    private int w, h, dpi;
+    private boolean active = false;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        createNotificationChannel();
-        startForeground(101, buildNotification());
-
-        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel ch = new NotificationChannel("ocr", "OCR", NotificationManager.IMPORTANCE_LOW);
+            getSystemService(NotificationManager.class).createNotificationChannel(ch);
+            startForeground(101, new Notification.Builder(this, "ocr").setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build());
+        } else {
+            startForeground(101, new Notification.Builder(this).setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build());
+        }
+        tr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         handler = new Handler(Looper.getMainLooper());
-
-        setupFloatingOverlay();
+        setupOverlay();
     }
 
     @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && intent.hasExtra("RESULT_CODE")) {
-            int resultCode = intent.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED);
-            Intent data = intent.getParcelableExtra("DATA");
-
-            MediaProjectionManager projectionManager =
-                    (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-
-            if (projectionManager != null && data != null) {
-                mediaProjection = projectionManager.getMediaProjection(resultCode, data);
-                startScreenCapture();
+    public int onStartCommand(Intent i, int f, int id) {
+        if (i != null && i.hasExtra("RESULT_CODE")) {
+            MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            Intent data = i.getParcelableExtra("DATA");
+            if (mpm != null && data != null) {
+                mp = mpm.getMediaProjection(i.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED), data);
+                startCapture();
             }
         }
         return START_NOT_STICKY;
     }
 
-    private void setupFloatingOverlay() {
-        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+    private void setupOverlay() {
+        wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setBackgroundColor(Color.argb(235, 18, 22, 35));
+        overlay.setPadding(24, 18, 24, 18);
 
-        overlayView = new LinearLayout(this);
-        overlayView.setOrientation(LinearLayout.VERTICAL);
-        overlayView.setBackgroundColor(Color.argb(235, 18, 22, 35));
-        overlayView.setPadding(24, 18, 24, 18);
+        TextView head = new TextView(this);
+        head.setText("AVIATOR LIVE OCR");
+        head.setTextColor(Color.rgb(0, 230, 150));
+        head.setTextSize(13);
+        head.setTypeface(null, Typeface.BOLD);
+        overlay.addView(head);
 
-        TextView header = new TextView(this);
-        header.setText("AVIATOR LIVE OCR");
-        header.setTextColor(Color.rgb(0, 230, 150));
-        header.setTextSize(13);
-        header.setTypeface(null, Typeface.BOLD);
-        overlayView.addView(header);
+        txtStatus = new TextView(this);
+        txtStatus.setText("Status: Waiting...");
+        txtStatus.setTextColor(Color.LTGRAY);
+        txtStatus.setTextSize(12);
+        overlay.addView(txtStatus);
 
-        overlayLastReadText = new TextView(this);
-        overlayLastReadText.setText("Status: Waiting for screen...");
-        overlayLastReadText.setTextColor(Color.LTGRAY);
-        overlayLastReadText.setTextSize(12);
-        overlayView.addView(overlayLastReadText);
+        txtSignal = new TextView(this);
+        txtSignal.setText(SignalEngine.getSignalAnalysis());
+        txtSignal.setTextColor(Color.WHITE);
+        txtSignal.setTextSize(12);
+        txtSignal.setPadding(0, 6, 0, 8);
+        overlay.addView(txtSignal);
 
-        overlaySignalText = new TextView(this);
-        overlaySignalText.setText(SignalEngine.getSignalAnalysis());
-        overlaySignalText.setTextColor(Color.WHITE);
-        overlaySignalText.setTextSize(12);
-        overlaySignalText.setPadding(0, 6, 0, 8);
-        overlayView.addView(overlaySignalText);
+        Button btn = new Button(this);
+        btn.setText("STOP OCR");
+        btn.setTextSize(11);
+        btn.setOnClickListener(v -> stopSelf());
+        overlay.addView(btn);
 
-        Button closeBtn = new Button(this);
-        closeBtn.setText("STOP OCR");
-        closeBtn.setTextSize(11);
-        closeBtn.setOnClickListener(v -> stopSelf());
-        overlayView.addView(closeBtn);
+        int type = Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE;
+        WindowManager.LayoutParams p = new WindowManager.LayoutParams(-2, -2, type, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+        p.gravity = Gravity.BOTTOM | Gravity.START;
+        p.x = 30;
+        p.y = 120;
 
-        int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
-
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                layoutFlag,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-        );
-
-        params.gravity = Gravity.BOTTOM | Gravity.START;
-        params.x = 30;
-        params.y = 120;
-
-        overlayView.setOnTouchListener(new View.OnTouchListener() {
-            private int initialX, initialY;
-            private float initialTouchX, initialTouchY;
-
+        overlay.setOnTouchListener(new View.OnTouchListener() {
+            int ix, iy; float tx, ty;
             @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                switch (event.getAction()) {
-                    case MotionEvent.ACTION_DOWN:
-                        initialX = params.x;
-                        initialY = params.y;
-                        initialTouchX = event.getRawX();
-                        initialTouchY = event.getRawY();
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        params.x = initialX + (int) (event.getRawX() - initialTouchX);
-                        params.y = initialY - (int) (event.getRawY() - initialTouchY);
-                        windowManager.updateViewLayout(overlayView, params);
-                        return true;
-                }
+            public boolean onTouch(View v, MotionEvent e) {
+                if (e.getAction() == MotionEvent.ACTION_DOWN) { ix = p.x; iy = p.y; tx = e.getRawX(); ty = e.getRawY(); return true; }
+                if (e.getAction() == MotionEvent.ACTION_MOVE) { p.x = ix + (int)(e.getRawX() - tx); p.y = iy - (int)(e.getRawY() - ty); wm.updateViewLayout(overlay, p); return true; }
                 return false;
             }
         });
-
-        windowManager.addView(overlayView, params);
+        wm.addView(overlay, p);
     }
 
-    private void startScreenCapture() {
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        screenWidth = metrics.widthPixels;
-        screenHeight = metrics.heightPixels;
-        screenDensity = metrics.densityDpi;
-
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
-
-        virtualDisplay = mediaProjection.createVirtualDisplay(
-                "AviatorScreenCapture",
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.getSurface(),
-                null,
-                null
-        );
-
-        isScanning = true;
-        scanRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!isScanning) return;
-                captureAndProcessFrame();
-                handler.postDelayed(this, 1200);
-            }
-        };
-        handler.post(scanRunnable);
+    private void startCapture() {
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        w = m.widthPixels; h = m.heightPixels; dpi = m.densityDpi;
+        ir = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+        vd = mp.createVirtualDisplay("OcrCap", w, h, dpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, ir.getSurface(), null, null);
+        active = true;
+        runner = () -> { if (active) { scan(); handler.postDelayed(runner, 1200); } };
+        handler.post(runner);
     }
 
-    private void captureAndProcessFrame() {
-        Image image = null;
+    private void scan() {
+        Image img = null;
         try {
-            image = imageReader.acquireLatestImage();
-            if (image == null) return;
+            img = ir.acquireLatestImage();
+            if (img == null) return;
+            Image.Plane[] pl = img.getPlanes();
+            ByteBuffer buf = pl[0].getBuffer();
+            int ps = pl[0].getPixelStride(), rs = pl[0].getRowStride();
+            Bitmap bmp = Bitmap.createBitmap(w + (rs - ps * w) / ps, h, Bitmap.Config.ARGB_8888);
+            bmp.copyPixelsFromBuffer(buf);
+            img.close(); img = null;
 
-            Image.Plane[] planes = image.getPlanes();
-            ByteBuffer buffer = planes.getBuffer();
-            int pixelStride = planes.getPixelStride();
-            int rowStride = planes.getRowStride();
-            int rowPadding = rowStride - pixelStride * screenWidth;
+            int ch = (int)(h * 0.75);
+            Bitmap crop = Bitmap.createBitmap(bmp, 0, 0, w, ch);
+            bmp.recycle();
+            Bitmap scaled = Bitmap.createScaledBitmap(crop, (int)(w * 1.5), (int)(ch * 1.5), true);
+            crop.recycle();
 
-            Bitmap bitmap = Bitmap.createBitmap(
-                    screenWidth + rowPadding / pixelStride,
-                    screenHeight,
-                    Bitmap.Config.ARGB_8888
-            );
-            bitmap.copyPixelsFromBuffer(buffer);
-            image.close();
-            image = null;
-
-            // Soma 75% ya sehemu ya juu ya skrini (acha sehemu ya chini ambapo kidirisha kimewekwa)
-            int cropHeight = (int) (screenHeight * 0.75);
-            Bitmap croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, cropHeight);
-            bitmap.recycle();
-
-            // Kuza picha mara 1.5 ili OCR isome namba ndogo za SportyBet kwa urahisi
-            Bitmap scaledBitmap = Bitmap.createScaledBitmap(
-                    croppedBitmap,
-                    (int) (screenWidth * 1.5),
-                    (int) (cropHeight * 1.5),
-                    true
-            );
-            croppedBitmap.recycle();
-
-            InputImage inputImage = InputImage.fromBitmap(scaledBitmap, 0);
-            textRecognizer.process(inputImage)
-                    .addOnSuccessListener(visionText -> {
-                        extractMultiplier(visionText.getText());
-                        scaledBitmap.recycle();
-                    })
-                    .addOnFailureListener(e -> {
-                        overlayLastReadText.setText("OCR Error: Retrying...");
-                        scaledBitmap.recycle();
-                    });
-
-        } catch (Exception e) {
-            if (image != null) image.close();
-        }
+            tr.process(InputImage.fromBitmap(scaled, 0)).addOnSuccessListener(vt -> {
+                parse(vt.getText());
+                scaled.recycle();
+            }).addOnFailureListener(e -> scaled.recycle());
+        } catch (Exception e) { if (img != null) img.close(); }
     }
 
-    private void extractMultiplier(String rawText) {
-        if (rawText == null || rawText.trim().isEmpty()) {
-            overlayLastReadText.setText("Screen: Blank / Protected");
-            return;
-        }
-
-        // Tambua namba zenye desimali na 'x' (mfano 1.45x, 1.45 x, 12.3x)
-        Pattern pattern = Pattern.compile("(\\d+\\.\\d{1,2})\\s*[xX]");
-        Matcher matcher = pattern.matcher(rawText);
-
-        boolean foundAny = false;
-        while (matcher.find()) {
+    private void parse(String raw) {
+        if (raw == null || raw.trim().isEmpty()) { txtStatus.setText("Screen: Blank"); return; }
+        Matcher m = Pattern.compile("(\\d+\\.\\d{1,2})\\s*[xX]").matcher(raw);
+        while (m.find()) {
             try {
-                double detectedValue = Double.parseDouble(matcher.group(1));
-                if (detectedValue >= 1.00 && detectedValue <= 5000.0) {
-                    SignalEngine.addResult(detectedValue);
-                    overlayLastReadText.setText("Last Read: " + String.format("%.2fx", detectedValue));
-                    overlaySignalText.setText(SignalEngine.getSignalAnalysis());
-                    foundAny = true;
-                    break; // Chukua matokeo ya kwanza ya juu (ya hivi karibuni zaidi)
+                double val = Double.parseDouble(m.group(1));
+                if (val >= 1.0 && val <= 5000.0) {
+                    SignalEngine.addResult(val);
+                    txtStatus.setText("Last Read: " + String.format("%.2fx", val));
+                    txtSignal.setText(SignalEngine.getSignalAnalysis());
+                    return;
                 }
-            } catch (NumberFormatException ignored) {
-            }
+            } catch (Exception ignored) {}
         }
-
-        if (!foundAny) {
-            overlayLastReadText.setText("Scanning... (No 'x' found yet)");
-        }
+        txtStatus.setText("Scanning... (No 'x')");
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    "ocr_channel",
-                    @Override
+    @Override
     public void onDestroy() {
-        isScanning = false;
-        if (handler != null && scanRunnable != null) handler.removeCallbacks(scanRunnable);
-        if (virtualDisplay != null) virtualDisplay.release();
-        if (imageReader != null) imageReader.close();
-        if (mediaProjection != null) mediaProjection.stop();
-        if (overlayView != null && windowManager != null) windowManager.removeView(overlayView);
+        active = false;
+        if (handler != null && runner != null) handler.removeCallbacks(runner);
+        if (vd != null) vd.release();
+        if (ir != null) ir.close();
+        if (mp != null) mp.stop();
+        if (overlay != null && wm != null) wm.removeView(overlay);
         super.onDestroy();
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent i) { return null; }
 }
-
