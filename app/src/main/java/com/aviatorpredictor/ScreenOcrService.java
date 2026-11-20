@@ -259,3 +259,20 @@ public class ScreenOcrService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     "ocr_channel",
+                    @Override
+    public void onDestroy() {
+        isScanning = false;
+        if (handler != null && scanRunnable != null) handler.removeCallbacks(scanRunnable);
+        if (virtualDisplay != null) virtualDisplay.release();
+        if (imageReader != null) imageReader.close();
+        if (mediaProjection != null) mediaProjection.stop();
+        if (overlayView != null && windowManager != null) windowManager.removeView(overlayView);
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}
+
