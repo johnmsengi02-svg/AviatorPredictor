@@ -2,6 +2,7 @@ package com.aviatorpredictor;
 
 import android.app.*;
 import android.content.*;
+import android.content.pm.ServiceInfo;
 import android.graphics.*;
 import android.hardware.display.*;
 import android.media.*;
@@ -32,26 +33,45 @@ public class ScreenOcrService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel("ocr", "OCR", NotificationManager.IMPORTANCE_LOW);
-            getSystemService(NotificationManager.class).createNotificationChannel(ch);
-            startForeground(101, new Notification.Builder(this, "ocr").setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build());
-        } else {
-            startForeground(101, new Notification.Builder(this).setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build());
-        }
         tr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         handler = new Handler(Looper.getMainLooper());
-        setupOverlay();
     }
 
     @Override
     public int onStartCommand(Intent i, int f, int id) {
         if (i != null && i.hasExtra("RESULT_CODE")) {
-            MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            int resCode = i.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED);
             Intent data = i.getParcelableExtra("DATA");
+
+            Notification notif;
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel("ocr", "OCR", NotificationManager.IMPORTANCE_LOW);
+                getSystemService(NotificationManager.class).createNotificationChannel(ch);
+                notif = new Notification.Builder(this, "ocr").setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build();
+            } else {
+                notif = new Notification.Builder(this).setContentTitle("Aviator OCR").setSmallIcon(android.R.drawable.ic_menu_view).build();
+            }
+
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(101, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } else {
+                startForeground(101, notif);
+            }
+
+            if (overlay == null) setupOverlay();
+
+            MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
             if (mpm != null && data != null) {
-                mp = mpm.getMediaProjection(i.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED), data);
-                startCapture();
+                mp = mpm.getMediaProjection(resCode, data);
+                if (mp != null) {
+                    mp.registerCallback(new MediaProjection.Callback() {
+                        @Override
+                        public void onStop() {
+                            stopSelf();
+                        }
+                    }, handler);
+                    startCapture();
+                }
             }
         }
         return START_NOT_STICKY;
@@ -72,7 +92,7 @@ public class ScreenOcrService extends Service {
         overlay.addView(head);
 
         txtStatus = new TextView(this);
-        txtStatus.setText("Status: Waiting...");
+        txtStatus.setText("Status: Active");
         txtStatus.setTextColor(Color.LTGRAY);
         txtStatus.setTextSize(12);
         overlay.addView(txtStatus);
@@ -124,8 +144,8 @@ public class ScreenOcrService extends Service {
             img = ir.acquireLatestImage();
             if (img == null) return;
             Image.Plane[] pl = img.getPlanes();
-            ByteBuffer buf = pl[0].getBuffer();
-            int ps = pl[0].getPixelStride(), rs = pl[0].getRowStride();
+            ByteBuffer buf = pl.getBuffer();
+            int ps = pl.getPixelStride(), rs = pl.getRowStride();
             Bitmap bmp = Bitmap.createBitmap(w + (rs - ps * w) / ps, h, Bitmap.Config.ARGB_8888);
             bmp.copyPixelsFromBuffer(buf);
             img.close(); img = null;
